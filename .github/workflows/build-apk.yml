@@ -17,7 +17,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -35,44 +35,58 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # NOT: android-actions/setup-android@v3 "Failed to find package 'tools'"
+      # hatası veriyor (cmdline-tools 16.0 + sdkmanager uyumsuz).
+      # Bu yüzden SDK elle kuruluyor.
       - name: Android SDK kur
-        uses: android-actions/setup-android@v3
-
-      - name: SDK bileşenlerini kur
         run: |
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          set -e
+          export ANDROID_HOME=$HOME/Android/Sdk
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          cd /tmp
+          curl -fsSL -o cmdtools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
           yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Gradle dağıtımını kur
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: İmzalama anahtarını oluştur
+      # İmzalama anahtarı repoda YOK. Secret'ta saklanan gerçek keystore
+      # geri yazılır — böylece CI çıktısı, sunucudaki APK ile **aynı
+      # sertifikayı** taşır ve kullanıcının uygulaması güncelleme olur.
+      - name: İmzalama anahtarını hazırla
         env:
-          STORE_PASSWORD: ${{ secrets.MIM_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.MIM_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.MIM_KEY_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.MIM_KEYSTORE_BASE64 }}
         run: |
           set -e
           mkdir -p keys
-          # Keystore secrets ile üretilir; repoya hiç girmez.
-          # Anahtar yoksa imzasız APK üretilir (dağıtım için yeterli değil ama
-          # derleme doğrulaması yapılabilir).
-          if [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
-            keytool -genkeypair -v \
-              -keystore keys/mim-release.jks \
-              -alias "${KEY_ALIAS:-mim}" \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
-              -dname "CN=Mim Hali Yikama, OU=Isletme, O=Mim Hali Yikama, L=Istanbul, C=TR"
-            echo "keystore üretildi"
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > keys/mim-release.jks
+            echo "keystore secret'tan geri yazıldı"
+            keytool -list -v -keystore keys/mim-release.jks \
+              -storepass "${{ secrets.MIM_STORE_PASSWORD }}" \
+              -alias "${{ secrets.MIM_KEY_ALIAS }}" 2>/dev/null \
+              | grep -i "SHA256:" || true
           else
-            echo "::warning::keystore secrets yok — imzasız APK derlenecek"
+            echo "::warning::MIM_KEYSTORE_BASE64 secret'ı yok — imzasız APK derlenecek"
+            keytool -genkeypair -v -keystore keys/mim-release.jks \
+              -alias "${MIM_KEY_ALIAS:-mim}" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "${MIM_STORE_PASSWORD:-changeit}" \
+              -keypass "${MIM_KEY_PASSWORD:-changeit}" \
+              -dname "CN=Mim Hali Yikama, OU=Isletme, O=Mim Hali Yikama, L=Istanbul, C=TR" 2>/dev/null
           fi
 
       - name: Sürüm bilgisini belirle
         id: ver
+        env:
+          ALIAS: ${{ secrets.MIM_KEY_ALIAS }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             VC=$(echo "${{ github.ref_name }}" | sed 's/^v//' | tr -d '.' | cut -c1-4)
@@ -97,17 +111,17 @@ jobs:
             -PversionName=${{ steps.ver.outputs.versionName }}
 
       - name: APK'yı doğrula
+        env:
+          MIM_STORE_PASSWORD: ${{ secrets.MIM_STORE_PASSWORD }}
         run: |
           set -e
           APK=app/build/outputs/apk/release/app-release.apk
           test -f "$APK"
           ls -lh "$APK"
-          # İmzalıysa doğrula
           if [ -n "$MIM_STORE_PASSWORD" ]; then
-            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose "$APK" | head -8
+            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "$APK" | head -12
           fi
-          # Sunucudaki ile aynı dosya adıyla dışa aktar
-          cp "$APK" MimHaliYikama-${{ steps.ver.outputs.versionName }}.apk
+          cp "$APK" "MimHaliYikama-${{ steps.ver.outputs.versionName }}.apk"
 
       - name: Sürüm varlığı olarak yükle
         uses: actions/upload-artifact@v4
