@@ -2,6 +2,8 @@ package com.mimhalikama.app.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -30,6 +32,9 @@ fun DetayEkrani(id: Long, geri: () -> Unit, detaySonrasi: () -> Unit) {
     var hata by remember { mutableStateOf("") }
     var islem by remember { mutableStateOf(false) }
     var menuAcik by remember { mutableStateOf(false) }
+    var fotoYukleniyor by remember { mutableStateOf(false) }
+    var fotoHata by remember { mutableStateOf("") }
+    var fotoBasari by remember { mutableStateOf("") }
     val kapsam = rememberCoroutineScope()
     val baglam = LocalContext.current
 
@@ -54,6 +59,44 @@ fun DetayEkrani(id: Long, geri: () -> Unit, detaySonrasi: () -> Unit) {
             hata = e.mesaj
         } catch (e: Exception) {
             hata = "Bağlantı hatası: ${e.message}"
+        }
+    }
+
+    // Galeriden fotoğraf seç → cihazda küçült → sunucuya yükle.
+    val galeriSecici = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        fotoHata = ""
+        fotoBasari = ""
+        fotoYukleniyor = true
+        kapsam.launch {
+            try {
+                // 1) Cihazda hazırla (sıkıştır + EXIF düzelt) — IO ağır iş.
+                val hazir = withContext(Dispatchers.IO) {
+                    FotoHazirlayici.hazirla(baglam, uri)
+                }
+                when (hazir) {
+                    is FotoHazirlayici.Sonuc.Hata -> {
+                        fotoHata = hazir.mesaj
+                    }
+                    is FotoHazirlayici.Sonuc.Basarili -> {
+                        // 2) Sunucuya yükle
+                        val cevap = withContext(Dispatchers.IO) {
+                            Api.fotoYukle(id, hazir.ad, hazir.mime, hazir.baytlar, "alim")
+                        }
+                        val yuklenen = cevap.optInt("yuklenen", 0)
+                        fotoBasari = "$yuklenen fotoğraf yüklendi (${hazir.boyut / 1024} KB)."
+                        yukle()
+                    }
+                }
+            } catch (e: Api.ApiHata) {
+                fotoHata = e.mesaj
+            } catch (e: Exception) {
+                fotoHata = "Yükleme hatası: ${e.message}"
+            } finally {
+                fotoYukleniyor = false
+            }
         }
     }
 
@@ -232,8 +275,15 @@ fun DetayEkrani(id: Long, geri: () -> Unit, detaySonrasi: () -> Unit) {
                         // --- fotoğraflar
                         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
                             Column(Modifier.padding(14.dp)) {
-                                Text("Fotoğraflar (${detay!!.foto.size})",
-                                    style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("Fotoğraflar (${detay!!.foto.size})",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold)
+                                }
                                 Spacer(Modifier.height(8.dp))
                                 if (detay!!.foto.isEmpty()) {
                                     Text("Henüz fotoğraf yok.", color = Soluk,
@@ -245,6 +295,34 @@ fun DetayEkrani(id: Long, geri: () -> Unit, detaySonrasi: () -> Unit) {
                                             style = MaterialTheme.typography.bodySmall,
                                             color = Soluk, modifier = Modifier.padding(vertical = 2.dp))
                                     }
+                                }
+                                Spacer(Modifier.height(12.dp))
+                                OutlinedButton(
+                                    onClick = { galeriSecici.launch("image/*") },
+                                    enabled = !fotoYukleniyor,
+                                    modifier = Modifier.fillMaxWidth().height(46.dp),
+                                ) {
+                                    if (fotoYukleniyor) {
+                                        CircularProgressIndicator(
+                                            Modifier.size(18.dp), strokeWidth = 2.dp, color = Teal
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Yükleniyor…")
+                                    } else {
+                                        Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Fotoğraf Yükle")
+                                    }
+                                }
+                                if (fotoHata.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(fotoHata, color = Kirmizi,
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (fotoBasari.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(fotoBasari, color = Yesil,
+                                        style = MaterialTheme.typography.bodySmall)
                                 }
                             }
                         }
