@@ -1,0 +1,129 @@
+name: APK Derle
+
+# Elle tetikleme veya sürüm etiketi ile çalışır.
+on:
+  workflow_dispatch:
+    inputs:
+      versionCode:
+        description: "versionCode (artırma)"
+        required: true
+        default: "2"
+      versionName:
+        description: "versionName"
+        required: true
+        default: "1.1"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu al
+        uses: actions/checkout@v4
+
+      - name: JDK 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK kur
+        uses: android-actions/setup-android@v3
+
+      - name: SDK bileşenlerini kur
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Gradle dağıtımını kur
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: İmzalama anahtarını oluştur
+        env:
+          STORE_PASSWORD: ${{ secrets.MIM_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MIM_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MIM_KEY_PASSWORD }}
+        run: |
+          set -e
+          mkdir -p keys
+          # Keystore secrets ile üretilir; repoya hiç girmez.
+          # Anahtar yoksa imzasız APK üretilir (dağıtım için yeterli değil ama
+          # derleme doğrulaması yapılabilir).
+          if [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            keytool -genkeypair -v \
+              -keystore keys/mim-release.jks \
+              -alias "${KEY_ALIAS:-mim}" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=Mim Hali Yikama, OU=Isletme, O=Mim Hali Yikama, L=Istanbul, C=TR"
+            echo "keystore üretildi"
+          else
+            echo "::warning::keystore secrets yok — imzasız APK derlenecek"
+          fi
+
+      - name: Sürüm bilgisini belirle
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VC=$(echo "${{ github.ref_name }}" | sed 's/^v//' | tr -d '.' | cut -c1-4)
+            VN=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          else
+            VC="${{ inputs.versionCode }}"
+            VN="${{ inputs.versionName }}"
+          fi
+          echo "versionCode=$VC" >> $GITHUB_OUTPUT
+          echo "versionName=$VN" >> $GITHUB_OUTPUT
+          echo "Sürüm: $VN (kod $VC)"
+
+      - name: Release APK derle
+        env:
+          MIM_STORE_FILE: ${{ github.workspace }}/keys/mim-release.jks
+          MIM_STORE_PASSWORD: ${{ secrets.MIM_STORE_PASSWORD }}
+          MIM_KEY_ALIAS: ${{ secrets.MIM_KEY_ALIAS }}
+          MIM_KEY_PASSWORD: ${{ secrets.MIM_KEY_PASSWORD }}
+        run: |
+          gradle assembleRelease --no-daemon \
+            -PversionCode=${{ steps.ver.outputs.versionCode }} \
+            -PversionName=${{ steps.ver.outputs.versionName }}
+
+      - name: APK'yı doğrula
+        run: |
+          set -e
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK"
+          ls -lh "$APK"
+          # İmzalıysa doğrula
+          if [ -n "$MIM_STORE_PASSWORD" ]; then
+            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose "$APK" | head -8
+          fi
+          # Sunucudaki ile aynı dosya adıyla dışa aktar
+          cp "$APK" MimHaliYikama-${{ steps.ver.outputs.versionName }}.apk
+
+      - name: Sürüm varlığı olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: MimHaliYikama-${{ steps.ver.outputs.versionName }}
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            MimHaliYikama-*.apk
+          retention-days: 90
+
+      - name: GitHub Release (etiketle tetiklendiyse)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            app/build/outputs/apk/release/app-release.apk \
+            --title "Mim Halı Yıkama ${{ steps.ver.outputs.versionName }}" \
+            --notes "Native Android uygulaması — otomatik derleme."

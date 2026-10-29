@@ -1,0 +1,18 @@
+# Gradle / derleme artıkları
+.gradle/
+build/
+.kotlin/
+local.properties
+*.iml
+.idea/
+
+# İmzalama anahtarı — GİZLİ. CI'da ortam değişkeni ile üretilir.
+# (Bu anahtar Play Store dışı dağıtım için sürüm kontrolünde tutulabilir,
+#  ancak daha güvenli olan secrets ile üretmektir. Bkz. .github/workflows/)
+keys/*.jks
+keys/*.keystore
+
+# Çıktılar
+*.apk
+*.idsig
+*.aab
